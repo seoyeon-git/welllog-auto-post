@@ -2,13 +2,16 @@
 WellLog(@welllog.kr) 자동 게시 스크립트
 - content/queue/ 안의 폴더 중 이름순으로 가장 앞선 것 하나를 골라 게시합니다.
   각 폴더는 caption.json 과 image.png 를 포함합니다.
-- catbox.moe에 이미지를 업로드해 공개 URL을 확보하고 (별도 계정/키 불필요)
+- 이미지는 외부 업로드 없이 이 저장소(Public)의 GitHub raw URL을 그대로 사용합니다.
 - Instagram Graph API(Instagram Login 방식)로 게시한 뒤,
 - 사용한 폴더를 content/posted/ 로 옮깁니다 (이 변경사항은 워크플로가 자동 커밋합니다).
 
 필요한 환경변수 (GitHub Actions Secrets에서 주입):
 - IG_ACCESS_TOKEN : 장기(60일) 액세스 토큰
 - IG_USER_ID      : Instagram 계정의 Instagram-scoped User ID
+
+주의: 이 스크립트는 저장소가 Public이어야 동작합니다 (raw.githubusercontent.com URL을
+인스타그램 서버가 로그인 없이 가져갈 수 있어야 하기 때문).
 """
 
 import os
@@ -21,6 +24,10 @@ import requests
 API_VERSION = "v21.0"
 IG_USER_ID = os.environ["IG_USER_ID"]
 ACCESS_TOKEN = os.environ["IG_ACCESS_TOKEN"]
+
+# "owner/repo" 형태. GitHub Actions에서는 자동으로 채워집니다.
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "seoyeon-git/welllog-auto-post")
+GITHUB_BRANCH = os.environ.get("GITHUB_REF_NAME", "main")
 
 QUEUE_DIR = "content/queue"
 POSTED_DIR = "content/posted"
@@ -38,28 +45,15 @@ def pick_next_item() -> str:
     return items[0]
 
 
-CATBOX_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-}
-
-
-def upload_to_catbox(image_path: str) -> str:
-    with open(image_path, "rb") as f:
-        resp = requests.post(
-            "https://catbox.moe/user/api.php",
-            data={"reqtype": "fileupload"},
-            files={"fileToUpload": f},
-            headers=CATBOX_HEADERS,
-            timeout=60,
-        )
+def build_raw_image_url(image_path: str) -> str:
+    # 예: https://raw.githubusercontent.com/seoyeon-git/welllog-auto-post/main/content/queue/001/image.png
+    url = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/{GITHUB_BRANCH}/{image_path}"
+    resp = requests.head(url, timeout=30, allow_redirects=True)
     if resp.status_code >= 400:
-        raise RuntimeError(f"catbox 업로드 실패: {resp.status_code} {resp.text}")
-    url = resp.text.strip()
-    if not url.startswith("http"):
-        raise RuntimeError(f"catbox 업로드 실패: {url}")
+        raise RuntimeError(
+            f"이미지 URL에 접근할 수 없습니다 ({resp.status_code}): {url}\n"
+            "저장소가 Public인지 확인해주세요."
+        )
     return url
 
 
@@ -96,48 +90,3 @@ def wait_until_ready(creation_id: str, timeout: int = 180, interval: int = 5) ->
 
 def publish_media(creation_id: str) -> dict:
     resp = requests.post(
-        f"https://graph.instagram.com/{API_VERSION}/{IG_USER_ID}/media_publish",
-        data={"creation_id": creation_id, "access_token": ACCESS_TOKEN},
-        timeout=30,
-    )
-    if resp.status_code >= 400:
-        raise RuntimeError(f"게시 실패: {resp.status_code} {resp.text}")
-    return resp.json()
-
-
-def main() -> None:
-    item_id = pick_next_item()
-    item_dir = os.path.join(QUEUE_DIR, item_id)
-    print(f"이번에 게시할 항목: {item_id}")
-
-    with open(os.path.join(item_dir, "caption.json"), "r", encoding="utf-8") as f:
-        caption = json.load(f)["caption"]
-    image_path = os.path.join(item_dir, "image.png")
-
-    print("1) 이미지를 catbox.moe에 업로드 중...")
-    image_url = upload_to_catbox(image_path)
-    print(f"   -> {image_url}")
-
-    print("2) 인스타그램 미디어 컨테이너 생성 중...")
-    creation_id = create_media_container(image_url, caption)
-    print(f"   -> creation_id: {creation_id}")
-
-    print("3) 처리 완료 대기 중...")
-    wait_until_ready(creation_id)
-
-    print("4) 게시 중...")
-    result = publish_media(creation_id)
-    print(f"게시 완료! media id: {result.get('id')}")
-
-    os.makedirs(POSTED_DIR, exist_ok=True)
-    dest = os.path.join(POSTED_DIR, item_id)
-    shutil.move(item_dir, dest)
-    print(f"5) {item_id} 를 posted/ 로 이동 완료")
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:  # noqa: BLE001
-        print(f"오류 발생: {e}", file=sys.stderr)
-        sys.exit(1)

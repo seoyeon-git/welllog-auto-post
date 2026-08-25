@@ -38,15 +38,25 @@ def pick_next_item() -> str:
     return items[0]
 
 
+CATBOX_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    ),
+}
+
+
 def upload_to_catbox(image_path: str) -> str:
     with open(image_path, "rb") as f:
         resp = requests.post(
             "https://catbox.moe/user/api.php",
             data={"reqtype": "fileupload"},
             files={"fileToUpload": f},
+            headers=CATBOX_HEADERS,
             timeout=60,
         )
-    resp.raise_for_status()
+    if resp.status_code >= 400:
+        raise RuntimeError(f"catbox 업로드 실패: {resp.status_code} {resp.text}")
     url = resp.text.strip()
     if not url.startswith("http"):
         raise RuntimeError(f"catbox 업로드 실패: {url}")

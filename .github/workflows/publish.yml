@@ -1,0 +1,58 @@
+name: Publish to Instagram
+
+on:
+  schedule:
+    # 매일 하루 2번, 10:00 / 17:00 KST (=UTC 01:00 / 08:00) 실행.
+    # 시간 바꾸고 싶으면 아래 cron 값만 수정하세요 (KST = UTC+9).
+    - cron: '0 1 * * *'
+    - cron: '0 8 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Korean font
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+
+      - name: Install Python dependencies
+        run: pip install requests anthropic playwright
+
+      - name: Install Chromium for Playwright
+        run: playwright install --with-deps chromium
+
+      - name: Generate today's card (AI) and add to queue
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/generate_and_queue.py
+
+      - name: Commit generated content (so raw URLs exist before publishing)
+        run: |
+          git config user.name "welllog-bot"
+          git config user.email "welllog-bot@users.noreply.github.com"
+          git add content/
+          git diff --cached --quiet || git commit -m "chore: generate new card [skip ci]"
+          git push
+
+      - name: Publish next queued post
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: python scripts/publish_to_instagram.py
+
+      - name: Commit queue update
+        run: |
+          git config user.name "welllog-bot"
+          git config user.email "welllog-bot@users.noreply.github.com"
+          git add content/
+          git diff --cached --quiet || git commit -m "chore: daily auto-generated post [skip ci]"
+          git push

@@ -1,0 +1,91 @@
+name: Publish to Instagram
+
+on:
+  schedule:
+    # 매일 하루 3번, 07:33 / 11:04 / 18:07 KST (=UTC 전날 22:33 / 02:04 / 09:07) 실행.
+    # 정각(00분)/30분처럼 "딱 떨어지는" 시각은 전세계 GitHub Actions 스케줄이 몰려서
+    # 지연·누락되기 쉽다는 공식 안내가 있어, 몇 분씩 일부러 어긋나게 설정했습니다.
+    # 시간 바꾸고 싶으면 아래 cron 값만 수정하세요 (KST = UTC+9). 단, 정각/30분은 피해주세요.
+    - cron: '33 22 * * *'
+    - cron: '4 2 * * *'
+    - cron: '7 9 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "체크하면 카드만 생성하고 인스타그램에는 게시하지 않음 (미리보기용)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# 용어 카드(publish.yml)와 뉴스 브리핑(publish_news.yml)이 같은 큐(content/queue/)를
+# 공유하기 때문에, 두 워크플로 중 어느 쪽이든 동시에 두 개 이상 실행되면 안 됩니다.
+# (동시에 돌면 서로 git push가 충돌해서 "이미 게시한 카드가 큐에 남아있다가 다음 실행 때
+# 똑같이 다시 게시되는" 중복 게시 버그가 생길 수 있음 — 2026-08-27에 실제로 겪은 문제.)
+# group 이름을 publish_news.yml과 동일하게 맞춰서, 두 워크플로를 합쳐 항상 한 번에 하나만
+# 실행되도록 강제합니다. 나중에 뭘 고치더라도 이 이름은 그대로 유지해주세요.
+concurrency:
+  group: welllog-publish-queue
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Korean font
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+
+      - name: Install Python dependencies
+        run: pip install requests anthropic playwright
+
+      - name: Install Chromium for Playwright
+        run: playwright install --with-deps chromium
+
+      - name: Generate today's card (AI) and add to queue
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          UNSPLASH_ACCESS_KEY: ${{ secrets.UNSPLASH_ACCESS_KEY }}
+        run: python scripts/generate_and_queue.py
+
+      - name: Commit generated content (so raw URLs exist before publishing)
+        run: |
+          git config user.name "welllog-bot"
+          git config user.email "welllog-bot@users.noreply.github.com"
+          git add content/
+          git diff --cached --quiet || git commit -m "chore: generate new card [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase origin "$GITHUB_REF_NAME" && git push && break
+            echo "push 실패, 재시도 ($i/3)..."
+            sleep 5
+          done
+
+      - name: Publish next queued post
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: python scripts/publish_to_instagram.py
+
+      # always()를 추가함(v3, 2026-09-03): 게시가 실패해도 이 커밋 단계는 항상 실행되어야
+      # publish_to_instagram.py가 기록한 "연속 실패 횟수"가 저장소에 반영됩니다.
+      # 이게 없으면 실패 시 아무것도 커밋이 안 되어 안전장치(N회 실패 시 content/failed/로
+      # 이동)가 다음 실행에 반영되지 않는 문제가 있었습니다.
+      - name: Commit queue update
+        if: ${{ always() && github.event.inputs.dry_run != 'true' }}
+        run: |
+          git config user.name "welllog-bot"
+          git config user.email "welllog-bot@users.noreply.github.com"
+          git add content/
+          git diff --cached --quiet || git commit -m "chore: daily auto-generated post [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase origin "$GITHUB_REF_NAME" && git push && break
+            echo "push 실패, 재시도 ($i/3)..."
+            sleep 5
+          done
